@@ -3,6 +3,8 @@ import random
 import mysql.connector
 import logging
 
+from mysql.connector import connection
+
 logger = logging.getLogger(__name__)
 
 
@@ -259,7 +261,12 @@ class GuacamoleDatabase(object):
                               hostname, password, port):
         """Create a VNC connection"""
 
-        data = {'group': group, 'name': name, 'parent': parent}
+        data = {
+            'group': group,
+            'name': name,
+            'parent': parent,
+            'protocol': 'vnc'
+        }
 
         if parent is not None:
             cmd = """
@@ -282,6 +289,8 @@ class GuacamoleDatabase(object):
         else:
             data['parent'] = 'NULL'
 
+        logging.debug("Connection Parent = %s", data['parent'])
+
         cmd = """
         INSERT INTO guacamole_connection
         (connection_name, protocol, parent_id)
@@ -291,15 +300,45 @@ class GuacamoleDatabase(object):
                 WHERE connection_group_name = %(group)s
                     AND type = 'ORGANIZATIONAL' AND parent_id = %(parent)s
             )
-        );
+        )
+        ON DUPLICATE KEY UPDATE
+            connection_name = VALUES (connection_name)
         """
+
+        logging.debug("Creating connection name = '%s' "
+                      "protocol = '%s' parent = '%s'",
+                      data['name'], data['protocol'], data['parent'])
 
         self._cursor.execute(cmd, data)
 
         if self._cursor.rowcount != 1:
-            return False
+            cmd = """
+                SELECT connection_id FROM guacamole_connection
+                WHERE (
+                    connection_name = %(name)s AND
+                    protocol = %(protocol)s AND
+                    parent_ID = (
+                        (SELECT connection_group_id FROM guacamole_connection_group
+                            WHERE connection_group_name = %(group)s
+                                AND type = 'ORGANIZATIONAL' AND parent_id = %(parent)s
+                        )
+                    )
+                )
+            """
+            self._cursor.execute(cmd, data)
+            rows = self._cursor.fetchall()
 
-        connection_id = self._cursor.lastrowid
+            if self._cursor.rowcount != 1:
+                logging.critical("Unable to fetch ID of connection")
+                return False
+
+            connection_id = rows[0][0]
+            logging.debug("Lookup connection ID : id = %d", connection_id)
+
+        else:
+
+            connection_id = self._cursor.lastrowid
+            logging.debug("Created connection id = %d", connection_id)
 
         # Create Connection Paramaters
 
@@ -321,6 +360,13 @@ class GuacamoleDatabase(object):
                 'value': vals[1]
             }
             self._cursor.execute(cmd, data)
+
+            if vals[0] != "password":
+                logging.debug("Created connection param: id = %d, name = %s, "
+                              "value = %s",
+                              connection_id, vals[0], vals[1])
+
+        return connection_id
 
     def create_connection_group(self, name, parent=None):
         """Create a connection group at the root"""
@@ -355,13 +401,14 @@ class GuacamoleDatabase(object):
             self._cursor.execute(cmd, data)
         except mysql.connector.errors.DataError:
             logging.warning("DataError: Parent Group does not exist")
-            return False
+            return None
 
-        self._cursor.fetchall()
+        rows = self._cursor.fetchall()
         if self._cursor.rowcount != 0:
             logging.debug("Connection group %s with parent %s exists",
                           name, parent)
-            return True
+            conn_id = rows[0][0]
+            return conn_id
 
         if parent is None:
             cmd_parent = 'NULL'
@@ -391,6 +438,38 @@ class GuacamoleDatabase(object):
 
         logging.debug("Created connection group %s with parent %s",
                       name, parent)
+
+        return self._cursor.lastrowid
+
+    def set_connection_permission(self, connid, group):
+        """Set Read Permissions on connection"""
+        data = {
+            'id': int(connid),
+            'group': group,
+            'permission': 'READ'
+        }
+
+        cmd = """
+            INSERT INTO guacamole_connection_permission
+            (connection_id, permission, entity_id)
+            VALUES (
+                %(id)s, %(permission)s, (
+                    SELECT entity_id FROM guacamole_entity
+                    WHERE
+                    name = %(group)s AND
+                    type = 'USER_GROUP'
+                )
+            )
+            ON DUPLICATE KEY UPDATE
+            connection_id = VALUES (connection_id)
+        """
+        self._cursor.execute(cmd, data)
+        if self._cursor.rowcount != 1:
+            logging.debug("Permission exists")
+
+        logging.debug("Set %s permission on id %d for group %s",
+                      data['permission'], data['id'], data['group'])
+
         return True
 
     def get_connection_permissions(self):
@@ -409,3 +488,34 @@ class GuacamoleDatabase(object):
         """
 
         return cmd
+
+    def set_connection_group_permission(self, connid, group):
+        """Set Read Permissions on connection groups"""
+        data = {
+            'id': int(connid),
+            'group': group,
+            'permission': 'READ'
+        }
+
+        cmd = """
+            INSERT INTO guacamole_connection_group_permission
+            (connection_group_id, permission, entity_id)
+            VALUES (
+                %(id)s, %(permission)s, (
+                    SELECT entity_id FROM guacamole_entity
+                    WHERE
+                    name = %(group)s AND
+                    type = 'USER_GROUP'
+                )
+            )
+            ON DUPLICATE KEY UPDATE
+            connection_group_id = VALUES (connection_group_id)
+        """
+        self._cursor.execute(cmd, data)
+        if self._cursor.rowcount != 1:
+            logging.debug("Permission exists")
+
+        logging.debug("Set %s permission on connection group id %d for group %s",
+                      data['permission'], data['id'], data['group'])
+
+        return True
