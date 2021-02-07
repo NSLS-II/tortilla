@@ -34,18 +34,29 @@ class GuacamoleDatabase(object):
 
         logger.info("Setup connection to %s as %s", self.host, self.user)
 
-    def is_user(self, username):
+    def _is_entity(self, username, entity):
         """Check if a user exists"""
+        data = {'name': username, 'entity': entity}
+
         cmd = """
             SELECT entity_id FROM guacamole_entity
-            WHERE name = %s AND type = 'USER'
+            WHERE name = %(name)s AND type = %(entity)s
         """
-        self._cursor.execute(cmd, (username, ))
+
+        self._cursor.execute(cmd, data)
         rows = self._cursor.fetchall()
-        if len(rows) == 1:
+        if len(rows) != 0:
             return True
 
         return False
+
+    def is_user(self, username):
+        """Check if a user exists"""
+        return self._is_entity(username, 'USER')
+
+    def is_group(self, groupname):
+        """Check if a user group exists"""
+        return self._is_entity(groupname, 'USER_GROUP')
 
     def create_user(self, username, name='', email='', employee_id=''):
         """Create a user who does not exist in the database"""
@@ -54,7 +65,6 @@ class GuacamoleDatabase(object):
             -- Create base entity entry for user
             INSERT INTO guacamole_entity (name, type)
                 VALUES (%(username)s, 'USER')
-            ON DUPLICATE KEY UPDATE name=name
         """
 
         create_salt = """
@@ -103,9 +113,51 @@ class GuacamoleDatabase(object):
             'organization': employee_id
         }
 
+        # First lets check if we have a valid entity ID
+
+        if not self.is_user(username):
+            logging.info("Creating user '%s'", username)
+            self._cursor.execute(create_entity, data)
+        else:
+            logging.info("User '%s' exists in database", username)
+
         self._cursor.execute(create_salt, data)
-        self._cursor.execute(create_entity, data)
         self._cursor.execute(create_user, data)
+        return True
+
+    def create_user_group(self, name):
+        """Create a Guacamole User Group"""
+        data = {'name': name}
+
+        create_entity = """
+            -- Create base entity entry for user
+            INSERT INTO guacamole_entity (name, type)
+                VALUES (%(name)s, 'USER_GROUP')
+        """
+        create_group = """
+            -- Create user and hash password with salt
+            INSERT INTO guacamole_user_group (
+                entity_id
+            )
+            VALUES (
+                (SELECT entity_id
+                    FROM guacamole_entity
+                    WHERE
+                        name = %(name)s
+                        AND type = 'USER_GROUP'
+                )
+            )
+            ON DUPLICATE KEY UPDATE
+            entity_id=entity_id
+        """
+
+        if not self.is_group(name):
+            logging.info("Creating Group '%s'", name)
+            self._cursor.execute(create_entity, data)
+            self._cursor.execute(create_group, data)
+        else:
+            logging.info("Group '%s' exists", name)
+
         return True
 
     def delete_user(self, username):
@@ -124,6 +176,7 @@ class GuacamoleDatabase(object):
         self._cursor.execute(cmd, (name, kind))
         rows = self._cursor.fetchall()
         if len(rows) != 1:
+            logging.warning("No data or wrong data returned getting ID")
             return None
 
         return rows[0][0]
@@ -148,12 +201,36 @@ class GuacamoleDatabase(object):
         try:
             self._cursor.execute(cmd, data)
         except mysql.connector.errors.IntegrityError:
+            logging.debug("Data error adding user to group, already there")
             return False
 
         if self._cursor.rowcount != 1:
+            logging.critical("Failed to add row to database for group"
+                             " addition")
             return False
 
+        logging.debug("Added user %s to group %s",
+                      user, group)
         return True
+
+    def get_group_members(self, group):
+        """Get group members"""
+        cmd = """
+            SELECT name from guacamole_user_group_member
+            INNER JOIN guacamole_entity ON
+            (guacamole_entity.entity_id=guacamole_user_group_member.member_entity_id)
+            WHERE user_group_id = (
+                SELECT user_group_id FROM guacamole_user_group
+                WHERE entity_id = (
+                    SELECT entity_id FROM guacamole_entity
+                    WHERE name = %s
+                )
+            )
+        """
+
+        self._cursor.execute(cmd, (group,))
+        rtn = [a[0] for a in self._cursor.fetchall()]
+        return rtn
 
     def remove_user_from_group(self, user, group):
         cmd = """
@@ -169,18 +246,42 @@ class GuacamoleDatabase(object):
 
         data = {'group': group, 'user': user}
         self._cursor.execute(cmd, data)
-        try:
-            self._cursor.execute(cmd, data)
-        except mysql.connector.errors.IntegrityError:
+        if self._cursor.rowcount != 1:
+            logging.warning("User %s was not in group %s",
+                            user, group)
             return False
 
-        if self._cursor.rowcount != 1:
-            return False
+        logging.debug("Removed user %s from group %s", user, group)
 
         return True
 
-    def create_vnc_connection(self, name, group, hostname, password, port):
+    def create_vnc_connection(self, name, group, parent,
+                              hostname, password, port):
         """Create a VNC connection"""
+
+        data = {'group': group, 'name': name, 'parent': parent}
+
+        if parent is not None:
+            cmd = """
+                SELECT connection_group_id from guacamole_connection_group
+                WHERE
+                connection_group_name = %(parent)s
+                AND
+                type =  'ORGANIZATIONAL'
+                AND
+                parent_id IS NULL
+            """
+
+            self._cursor.execute(cmd, data)
+            rows = self._cursor.fetchall()
+            if self._cursor.rowcount != 1:
+                return False
+
+            data['parent'] = rows[0][0]
+
+        else:
+            data['parent'] = 'NULL'
+
         cmd = """
         INSERT INTO guacamole_connection
         (connection_name, protocol, parent_id)
@@ -188,11 +289,11 @@ class GuacamoleDatabase(object):
         (%(name)s, 'vnc',
             (SELECT connection_group_id FROM guacamole_connection_group
                 WHERE connection_group_name = %(group)s
-                    AND type = 'ORGANIZATIONAL' AND parent_id is NULL
+                    AND type = 'ORGANIZATIONAL' AND parent_id = %(parent)s
             )
         );
         """
-        data = {'group': group, 'name': name}
+
         self._cursor.execute(cmd, data)
 
         if self._cursor.rowcount != 1:
@@ -221,21 +322,90 @@ class GuacamoleDatabase(object):
             }
             self._cursor.execute(cmd, data)
 
-    def get_group_members(self, group):
-        """Get group members"""
+    def create_connection_group(self, name, parent=None):
+        """Create a connection group at the root"""
+        data = {'name': name, 'parent': parent}
+
         cmd = """
-            SELECT name from guacamole_user_group_member
-            INNER JOIN guacamole_entity ON
-            (guacamole_entity.entity_id=guacamole_user_group_member.member_entity_id)
-            WHERE user_group_id = (
-                SELECT user_group_id FROM guacamole_user_group
-                WHERE entity_id = (
-                    SELECT entity_id FROM guacamole_entity
-                    WHERE name = %s
-                )
-            )
+            SELECT connection_group_id FROM guacamole_connection_group
+            WHERE
+            connection_group_name = %(name)s
+            AND
+            type = 'ORGANIZATIONAL'
+            AND
         """
 
-        self._cursor.execute(cmd, (group,))
-        rtn = [a[0] for a in self._cursor.fetchall()]
-        return rtn
+        if parent is None:
+            cmd += 'parent_id IS NULL'
+        else:
+            cmd += """
+                parent_id = (
+                    SELECT connection_group_id
+                    FROM guacamole_connection_group
+                    WHERE
+                    connection_group_name = %(parent)s
+                    AND
+                    type = 'ORGANIZATIONAL'
+                    AND
+                    parent_id IS NULL
+                )
+                """
+
+        try:
+            self._cursor.execute(cmd, data)
+        except mysql.connector.errors.DataError:
+            logging.warning("DataError: Parent Group does not exist")
+            return False
+
+        self._cursor.fetchall()
+        if self._cursor.rowcount != 0:
+            logging.debug("Connection group %s with parent %s exists",
+                          name, parent)
+            return True
+
+        if parent is None:
+            cmd_parent = 'NULL'
+        else:
+            cmd_parent = """((
+                SELECT connection_group_id
+                FROM guacamole_connection_group cg
+                WHERE
+                cg.connection_group_name = %(parent)s
+                AND
+                cg.type = 'ORGANIZATIONAL'
+                AND
+                cg.parent_id IS NULL
+            ))"""
+
+        cmd = """
+            INSERT INTO guacamole_connection_group
+            (parent_id, type, connection_group_name)
+            VALUES
+            ({}, 'ORGANIZATIONAL', %(name)s)
+        """.format(cmd_parent)
+
+        self._cursor.execute(cmd, data)
+        if self._cursor.rowcount != 1:
+            logging.warning("Failed to insert connection group into database")
+            return False
+
+        logging.debug("Created connection group %s with parent %s",
+                      name, parent)
+        return True
+
+    def get_connection_permissions(self):
+        """Get Connection permissions from DB"""
+        cmd = """
+            SELECT * FROM guacamole_connection_permission
+            INNER JOIN guacamole_entity
+            ON (guacamole_entity.entity_id =
+                guacamole_connection_permission.entity_id)
+            INNER JOIN guacamole_connection
+            ON (guacamole_connection_permission.connection_id =
+                guacamole_connection.connection_id)
+            INNER JOIN guacamole_connection_group
+            ON (guacamole_connection_group.connection_group_id =
+                guacamole_connection_permission.entity_id)
+        """
+
+        return cmd
