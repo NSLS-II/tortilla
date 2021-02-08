@@ -258,14 +258,17 @@ class GuacamoleDatabase(object):
         return True
 
     def create_vnc_connection(self, name, group, parent,
-                              hostname, password, port):
+                              hostname, password, port,
+                              read_only=False):
         """Create a VNC connection"""
 
         data = {
             'group': group,
             'name': name,
             'parent': parent,
-            'protocol': 'vnc'
+            'protocol': 'vnc',
+            'max_conn': 10,
+            'max_conn_user': 2
         }
 
         if parent is not None:
@@ -293,16 +296,19 @@ class GuacamoleDatabase(object):
 
         cmd = """
         INSERT INTO guacamole_connection
-        (connection_name, protocol, parent_id)
+        (connection_name, protocol, max_connections,
+         max_connections_per_user, parent_id)
         VALUES
-        (%(name)s, 'vnc',
+        (%(name)s, 'vnc', %(max_conn_user)s, %(max_conn)s,
             (SELECT connection_group_id FROM guacamole_connection_group
                 WHERE connection_group_name = %(group)s
                     AND type = 'ORGANIZATIONAL' AND parent_id = %(parent)s
             )
         )
         ON DUPLICATE KEY UPDATE
-            connection_name = VALUES (connection_name)
+            connection_name = %(name)s,
+            max_connections = %(max_conn)s,
+            max_connections_per_user = %(max_conn_user)s
         """
 
         logging.debug("Creating connection name = '%s' "
@@ -342,8 +348,13 @@ class GuacamoleDatabase(object):
 
         # Create Connection Paramaters
 
-        for vals in zip(('hostname', 'password', 'port'),
-                        (hostname, password, port)):
+        if read_only:
+            _read_only = 'true'
+        else:
+            _read_only = 'false'
+
+        for vals in zip(('hostname', 'password', 'port', 'read-only'),
+                        (hostname, password, port, _read_only)):
             cmd = """
                 INSERT INTO guacamole_connection_parameter
                     (connection_id, parameter_name, parameter_value)
