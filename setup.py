@@ -46,9 +46,9 @@ setup(
     packages=find_packages(exclude=['docs', 'tests']),
     entry_points={
         'console_scripts': [
-            'tortilla_sync_groups = tortilla.cli:sync_groups',
-            'tortilla_sync_add = tortilla.cli:sync_groups_add',
-            'tortilla_sync_remove = tortilla.cli:sync_groups_remove',
+            'tortilla_sync_groups = tortilla.sync:sync_groups',
+            'tortilla_sync_add = tortilla.sync:sync_groups_add',
+            'tortilla_sync_remove = tortilla.sync:sync_groups_remove',
         ],
     },
     include_package_data=True,

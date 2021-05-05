@@ -257,16 +257,17 @@ class GuacamoleDatabase(object):
 
         return True
 
-    def create_vnc_connection(self, name, group, parent,
-                              hostname, password, port,
-                              read_only=False):
-        """Create a VNC connection"""
+    def create_connection(self, name, group, parent,
+                          hostname, password, port,
+                          read_only=False, protocol='vnc',
+                          username='dummy', domain='xrdp'):
+        """Create a Connection"""
 
         data = {
             'group': group,
             'name': name,
             'parent': parent,
-            'protocol': 'vnc',
+            'protocol': protocol,
             'max_conn': 10,
             'max_conn_user': 2
         }
@@ -299,7 +300,7 @@ class GuacamoleDatabase(object):
         (connection_name, protocol, max_connections,
          max_connections_per_user, parent_id)
         VALUES
-        (%(name)s, 'vnc', %(max_conn_user)s, %(max_conn)s,
+        (%(name)s, %(protocol)s, %(max_conn_user)s, %(max_conn)s,
             (SELECT connection_group_id FROM guacamole_connection_group
                 WHERE connection_group_name = %(group)s
                     AND type = 'ORGANIZATIONAL' AND parent_id = %(parent)s
@@ -348,13 +349,21 @@ class GuacamoleDatabase(object):
 
         # Create Connection Paramaters
 
+        params = dict()
+        params['hostname'] = hostname
+        params['password'] = password
+        params['port'] = port
         if read_only:
-            _read_only = 'true'
+            params['read-only'] = 'true'
         else:
-            _read_only = 'false'
+            params['read-only'] = 'false'
+        if protocol == 'rdp':
+            params['domain'] = domain
+            params['ignore-cert'] = 'true'
+            params['security'] = 'tls'
+            params['username'] = username
 
-        for vals in zip(('hostname', 'password', 'port', 'read-only'),
-                        (hostname, password, port, _read_only)):
+        for key, val in params.items():
             cmd = """
                 INSERT INTO guacamole_connection_parameter
                     (connection_id, parameter_name, parameter_value)
@@ -367,15 +376,15 @@ class GuacamoleDatabase(object):
             """
             data = {
                 'id': connection_id,
-                'name': vals[0],
-                'value': vals[1]
+                'name': key,
+                'value': val
             }
             self._cursor.execute(cmd, data)
 
-            if vals[0] != "password":
+            if key != "password":
                 logging.debug("Created connection param: id = %d, name = %s, "
                               "value = %s",
-                              connection_id, vals[0], vals[1])
+                              connection_id, key, val)
 
         return connection_id
 
