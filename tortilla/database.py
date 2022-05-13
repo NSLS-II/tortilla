@@ -300,7 +300,7 @@ class GuacamoleDatabase(object):
         (connection_name, protocol, max_connections,
          max_connections_per_user, parent_id)
         VALUES
-        (%(name)s, %(protocol)s, %(max_conn_user)s, %(max_conn)s,
+        (%(name)s, %(protocol)s, %(max_conn)s, %(max_conn_user)s,
             (SELECT connection_group_id FROM guacamole_connection_group
                 WHERE connection_group_name = %(group)s
                     AND type = 'ORGANIZATIONAL' AND parent_id = %(parent)s
